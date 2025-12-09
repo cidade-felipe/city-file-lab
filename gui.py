@@ -36,7 +36,7 @@ frame_menu = tk.Frame(janela, bg='#f5f6f7')
 frame_menu.pack(side='right', fill='y', padx=(0, 20), pady=20)
 
 try:
-    image_path = './img/logo.png'
+    image_path = './figure/logo.png'
     img = Image.open(image_path).resize((190, 190))
     img_tk = ImageTk.PhotoImage(img)
     lbl_logo = ttk.Label(frame_menu, image=img_tk, background='#f5f6f7')
