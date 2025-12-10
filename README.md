@@ -1,4 +1,4 @@
-# Analisador de Arquivos
+# CITY FILE LAB
 
 O Analisador de Arquivos é uma aplicação em Python que permite enviar arquivos para um banco PostgreSQL, extrair o conteúdo, indexar com embeddings e fazer perguntas em linguagem natural sobre cada arquivo.  
 Além disso, ele gera gráficos prontos sobre o uso do sistema, executa consultas SQL customizadas e oferece uma interface gráfica amigável em Tkinter.
