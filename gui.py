@@ -10,7 +10,7 @@ import markdown2
 import main as m
 
 janela = tk.Tk()
-janela.title('ANALISADOR DE ARQUIVOS')
+janela.title('City File Lab')
 janela.geometry('1200x700')
 janela.configure(bg='#f5f6f7')
 janela.state('zoomed')
