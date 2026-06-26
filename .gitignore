@@ -207,6 +207,6 @@ marimo/_lsp/
 __marimo__/
 charts/
 indices_faiss/
-tests/
 consultas/
+Backup/
 tempCodeRunnerFile.py

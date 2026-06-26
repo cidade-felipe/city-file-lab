@@ -16,10 +16,11 @@ import markdown2
 import re
 import matplotlib.pyplot as plt
 import pandas as pd
+from pathlib import Path
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, LargeBinary,
-    DateTime, ForeignKey, Float, JSON, func
+    DateTime, ForeignKey, Float, JSON, func, text as sql_text
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
@@ -177,12 +178,13 @@ class Resumo(Base):
 # ---------------------------------------------------------------------
 # CONSTANTES
 # ---------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
 EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
-INDEX_DIR = 'indices_faiss'
-CHART_DIR = 'charts'
-RESULT_CONSULTA_DIR = 'consultas'
+INDEX_DIR = str(BASE_DIR / 'indices_faiss')
+CHART_DIR = str(BASE_DIR / 'charts')
+RESULT_CONSULTA_DIR = str(BASE_DIR / 'consultas')
 caminhos = (INDEX_DIR, CHART_DIR, RESULT_CONSULTA_DIR)
 
 tipos_arquivos = ['pdf', 'txt', 'xlsx', 'xls', 'docx', 'md', 'csv']
@@ -215,6 +217,20 @@ def ensure_tipo(sess, nome_tipo: str) -> TipoArquivo:
         sess.add(obj)
         sess.commit()
     return obj
+
+
+def resolve_safe_index_path(index_path: str) -> str:
+    path = Path(index_path)
+    if not path.is_absolute():
+        path = BASE_DIR / path
+
+    resolved_path = path.resolve()
+    index_root = Path(INDEX_DIR).resolve()
+    try:
+        resolved_path.relative_to(index_root)
+    except ValueError as e:
+        raise ValueError('O caminho do índice FAISS está fora da pasta permitida.') from e
+    return str(resolved_path)
 
 
 def extract_text_from_pdf(data: bytes) -> str:
@@ -301,7 +317,9 @@ def build_or_load_index_for_file(sess, conteudo: ConteudoExtraido) -> Tuple[FAIS
         raise ValueError('O arquivo não possui conteúdo indexável, a extração retornou texto vazio.')
 
     emb = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    index_path = os.path.join(INDEX_DIR, f'faiss_{conteudo.arquivo_id}.index')
+    index_path = resolve_safe_index_path(
+        os.path.join(INDEX_DIR, f'faiss_{conteudo.arquivo_id}.index')
+    )
 
     if os.path.exists(index_path):
         vs = FAISS.load_local(index_path, emb, allow_dangerous_deserialization=True)
@@ -349,11 +367,14 @@ def answer_question(sess, arquivo_id: int, pergunta_texto: str) -> str:
             .one_or_none()
         )
 
-        if not embedding_meta or not os.path.exists(getattr(embedding_meta, "index_path", "")):
+        stored_index_path = getattr(embedding_meta, 'index_path', '') if embedding_meta else ''
+        index_path = resolve_safe_index_path(stored_index_path) if stored_index_path else ''
+
+        if not embedding_meta or not os.path.exists(index_path):
             vs, _ = build_or_load_index_for_file(sess, arq.conteudo_extraido)
         else:
             emb = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-            vs = FAISS.load_local(embedding_meta.index_path, emb, allow_dangerous_deserialization=True)
+            vs = FAISS.load_local(index_path, emb, allow_dangerous_deserialization=True)
     except Exception as e:
         sess.add(Log(arquivo_id=arquivo_id, acao='erro_indexacao', detalhe=str(e)))
         sess.commit()
@@ -406,23 +427,32 @@ def answer_question(sess, arquivo_id: int, pergunta_texto: str) -> str:
 # UPLOAD / REMOÇÃO / LIMPEZA
 # ---------------------------------------------------------------------
 def upload_file(sess, filepath: str) -> dict:
+    nome = os.path.basename(filepath)
+    tipo_nome = infer_tipo_from_name(nome)
+    if tipo_nome not in tipos_arquivos:
+        raise ValueError('Formato de arquivo não suportado.')
+
     with open(filepath, 'rb') as f:
         data = f.read()
 
-    nome = os.path.basename(filepath)
-    tipo_nome = infer_tipo_from_name(nome)
     tipo = ensure_tipo(sess, tipo_nome)
     h = sha256_bytes(data)
 
-    if tipo_nome not in tipos_arquivos:
-        return 'Formato de arquivo não suportado!'
-
-    existente = sess.query(Arquivo).filter_by(nome=nome).one_or_none()
+    existente = (
+        sess.query(Arquivo)
+        .filter_by(hash_sha256=h)
+        .order_by(Arquivo.id)
+        .first()
+    )
     if existente:
-        sess.add(Log(arquivo_id=existente.id, acao='upload_duplicado', detalhe=f'Arquivo {nome} já existe no banco.'))
+        sess.add(Log(
+            arquivo_id=existente.id,
+            acao='upload_duplicado',
+            detalhe=f'O conteúdo de {nome} já existe no arquivo {existente.nome}.',
+        ))
         sess.commit()
-        print(f'[INFO] Arquivo "{nome}" já existe (ID={existente.id}). Pulando upload.')
-        return {'id': existente.id, 'duplicado': True}
+        print(f'[INFO] Conteúdo de "{nome}" já existe (ID={existente.id}). Pulando upload.')
+        return {'id': existente.id, 'duplicado': True, 'nome': existente.nome}
 
     arq = Arquivo(
         nome=nome,
@@ -486,7 +516,7 @@ def upload_file(sess, filepath: str) -> dict:
     sess.commit()
 
     print(f'[OK] Upload, processamento e resumo concluídos. ID={arq.id}')
-    return {'id': arq.id, 'duplicado': False}
+    return {'id': arq.id, 'duplicado': False, 'nome': arq.nome}
 
 
 def remover_pasta_com_permissao(caminho: str) -> None:
@@ -523,11 +553,13 @@ def remove_file(sess, arquivo_id: int) -> str:
     try:
         if arq.conteudo_extraido:
             emb = sess.query(Embedding).filter_by(conteudo_id=arq.conteudo_extraido.id).one_or_none()
-            if emb and emb.index_path and os.path.exists(emb.index_path):
+            if emb and emb.index_path:
                 try:
-                    gc.collect()
-                    time.sleep(0.1)
-                    remover_pasta_com_permissao(emb.index_path)
+                    index_path = resolve_safe_index_path(emb.index_path)
+                    if os.path.exists(index_path):
+                        gc.collect()
+                        time.sleep(0.1)
+                        remover_pasta_com_permissao(index_path)
                 except Exception as e:
                     sess.add(Log(
                         arquivo_id=arquivo_id,
@@ -619,6 +651,70 @@ def run_and_plot(titulo, eixo_x, eixo_y, sql: str, descricao: str, chart_type: s
     plt.show()
     plt.close()
     return f'Gráfico salvo em {img_path}'
+
+
+def normalize_read_only_sql(sql: str) -> str:
+    query = sql.strip()
+    if query.endswith(';'):
+        query = query[:-1].rstrip()
+
+    if not query:
+        raise ValueError('Informe uma consulta SQL.')
+    if ';' in query:
+        raise ValueError('Apenas uma instrução SQL é permitida por consulta.')
+    if not re.match(r'^select\b', query, flags=re.IGNORECASE):
+        raise ValueError('Apenas consultas SELECT são permitidas.')
+    return query
+
+
+def read_sql_query_read_only(sql: str) -> pd.DataFrame:
+    query = normalize_read_only_sql(sql)
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.exec_driver_sql('SET TRANSACTION READ ONLY')
+            return pd.read_sql_query(sql_text(query), con=conn)
+        finally:
+            transaction.rollback()
+
+
+def execute_custom_query(sess, sql: str, descricao: str = '') -> dict:
+    query = normalize_read_only_sql(sql)
+    output_path = None
+
+    try:
+        consulta = ConsultaSQL(sql=query, descricao=descricao.strip())
+        sess.add(consulta)
+        sess.flush()
+
+        df = read_sql_query_read_only(query)
+        linhas, colunas = df.shape
+        os.makedirs(RESULT_CONSULTA_DIR, exist_ok=True)
+        filename = f'consulta_{consulta.id}_{int(time.time())}.xlsx'
+        output_path = os.path.join(RESULT_CONSULTA_DIR, filename)
+        df.to_excel(output_path, index=False)
+
+        resultado = ResultadoConsulta(
+            consulta_id=consulta.id,
+            caminho_arquivo=output_path,
+            dados_json=json.loads(df.to_json(orient='records')),
+            linhas=linhas,
+            colunas=colunas,
+        )
+        sess.add(resultado)
+        sess.commit()
+        return {
+            'id': consulta.id,
+            'caminho_arquivo': output_path,
+            'linhas': linhas,
+            'colunas': colunas,
+        }
+    except Exception:
+        sess.rollback()
+        if output_path and os.path.exists(output_path):
+            with contextlib.suppress(OSError):
+                os.remove(output_path)
+        raise
 
 
 # ---------------------------------------------------------------------
@@ -768,36 +864,13 @@ def handle_ready_graphs():
 def handle_custom_sql():
     with SessionLocal() as sess:
         sql = input('SQL (apenas SELECT): ').strip()
-        if not sql.lower().startswith('select'):
-            print('[ERRO] Apenas consultas SELECT são permitidas.')
-            return
-
         descricao = input('Descrição breve da consulta: ').strip()
         try:
-            cons = ConsultaSQL(sql=sql, descricao=descricao)
-            sess.add(cons)
-            sess.commit()
+            resultado = execute_custom_query(sess, sql, descricao)
 
-            df = pd.read_sql_query(sql, con=engine)
-            linhas, colunas = df.shape
-            timestamp = int(time.time())
-            filename = f'consulta_{cons.id}_{timestamp}.xlsx'
-            path = os.path.join(RESULT_CONSULTA_DIR, filename)
-            df.to_excel(path, index=False)
-
-            resultado = ResultadoConsulta(
-                consulta_id=cons.id,
-                caminho_arquivo=path,
-                dados_json=json.loads(df.to_json(orient='records')),
-                linhas=linhas,
-                colunas=colunas
-            )
-            sess.add(resultado)
-            sess.commit()
-
-            print(f'\n[OK] Consulta {cons.id} executada com sucesso!')
-            print(f'[INFO] {linhas} linhas × {colunas} colunas retornadas.')
-            print(f'[RESULTADO] Salvo em: {path}\n')
+            print(f'\n[OK] Consulta {resultado["id"]} executada com sucesso!')
+            print(f'[INFO] {resultado["linhas"]} linhas × {resultado["colunas"]} colunas retornadas.')
+            print(f'[RESULTADO] Salvo em: {resultado["caminho_arquivo"]}\n')
 
         except Exception as e:
             print(f'[ERRO] Falha ao executar consulta: {e}')

@@ -4,7 +4,7 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 import os
 import pandas as pd
-import time
+import threading
 from tkinterweb import HtmlFrame
 import markdown2
 import main as m
@@ -36,7 +36,7 @@ frame_menu = tk.Frame(janela, bg='#f5f6f7')
 frame_menu.pack(side='right', fill='y', padx=(0, 20), pady=20)
 
 try:
-    image_path = './figure/logo.png'
+    image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'figure', 'logo.png')
     img = Image.open(image_path).resize((190, 190))
     img_tk = ImageTk.PhotoImage(img)
     lbl_logo = ttk.Label(frame_menu, image=img_tk, background='#f5f6f7')
@@ -212,6 +212,42 @@ def exibir_mensagem(remetente, texto, cor=None):
 exibir_mensagem('Sistema', '[OK] Interface inicializada com sucesso!')
 
 
+_tarefas_ativas = 0
+
+
+def executar_em_background(tarefa, ao_concluir, ao_falhar):
+    global _tarefas_ativas
+    _tarefas_ativas += 1
+    janela.configure(cursor='watch')
+
+    def finalizar():
+        global _tarefas_ativas
+        _tarefas_ativas = max(0, _tarefas_ativas - 1)
+        if _tarefas_ativas == 0:
+            janela.configure(cursor='')
+
+    def executar():
+        try:
+            resultado = tarefa()
+        except Exception as e:
+            mensagem = str(e)
+
+            def reportar_erro():
+                finalizar()
+                ao_falhar(mensagem)
+
+            janela.after(0, reportar_erro)
+            return
+
+        def reportar_sucesso():
+            finalizar()
+            ao_concluir(resultado)
+
+        janela.after(0, reportar_sucesso)
+
+    threading.Thread(target=executar, daemon=True).start()
+
+
 def criar_tabelas():
     try:
         msg = m.create_all()
@@ -267,40 +303,51 @@ def upload_arquivo():
     if not caminho:
         return
 
-    try:
+    def processar_upload():
         with m.SessionLocal() as sess:
             resultado = m.upload_file(sess, caminho)
 
         arq_id = resultado['id']
+        with m.SessionLocal() as sess:
+            log = (
+                sess.query(m.Log)
+                .filter_by(arquivo_id=arq_id)
+                .order_by(m.Log.data.desc())
+                .first()
+            )
+            dados_log = (
+                (log.acao, log.detalhe, log.data)
+                if log
+                else None
+            )
+        return resultado, dados_log
 
+    def concluir_upload(payload):
+        resultado, dados_log = payload
+        arq_id = resultado['id']
         if resultado['duplicado']:
-            exibir_mensagem('Sistema', f'O arquivo já existe no banco. ID={arq_id}. Upload pulado')
+            nome_existente = resultado['nome']
+            exibir_mensagem(
+                'Sistema',
+                f'O conteúdo já existe no arquivo "{nome_existente}". ID={arq_id}. Upload pulado.',
+            )
         else:
             exibir_mensagem('Sistema', f'Upload concluído com sucesso. ID={arq_id}')
-            time.sleep(0.5)
 
-        df_logs = pd.read_sql_query(
-            f'''
-            SELECT acao, detalhe, data 
-            FROM log 
-            WHERE arquivo_id={arq_id} 
-            ORDER BY data DESC 
-            LIMIT 1
-            ''',
-            con=m.engine
-        )
-
-        if not df_logs.empty:
-            log = df_logs.iloc[0]
-            cor = '#ffe6e6' if 'erro' in log['acao'].lower() else '#e6ffe6'
-            if 'duplicado' in log['acao'].lower():
+        if dados_log:
+            acao, detalhe, data = dados_log
+            cor = '#ffe6e6' if 'erro' in acao.lower() else '#e6ffe6'
+            if 'duplicado' in acao.lower():
                 cor = '#fff8dc'
-            hora = pd.to_datetime(log['data']).strftime('%d-%m-%y-%H:%M:%S')
-            exibir_mensagem('Log', f"[{hora}] {log['acao']} → {log['detalhe']}", cor)
+            hora = pd.to_datetime(data).strftime('%d-%m-%y-%H:%M:%S')
+            exibir_mensagem('Log', f'[{hora}] {acao} → {detalhe}', cor)
 
-    except Exception as e:
-        exibir_mensagem('Erro', str(e))
-        messagebox.showerror('Erro', str(e))
+    def falhar_upload(mensagem):
+        exibir_mensagem('Erro', mensagem)
+        messagebox.showerror('Erro', mensagem)
+
+    exibir_mensagem('Sistema', f'Processando o arquivo "{os.path.basename(caminho)}"...')
+    executar_em_background(processar_upload, concluir_upload, falhar_upload)
 
 
 id_arquivo_escolhido = None
@@ -360,13 +407,25 @@ def enviar_pergunta():
         return
     exibir_mensagem('Você', pergunta)
     entry_enviar.delete(0, tk.END)
-    try:
+    entry_enviar.configure(state='disabled')
+    arquivo_id = id_arquivo_escolhido
+
+    def processar_pergunta():
         with m.SessionLocal() as sess:
-            resposta = m.answer_question(sess, id_arquivo_escolhido, pergunta)
+            return m.answer_question(sess, arquivo_id, pergunta)
+
+    def concluir_pergunta(resposta):
         exibir_mensagem('IA', resposta)
-    except Exception as e:
-        exibir_mensagem('Erro', str(e))
-        messagebox.showerror('Erro', str(e))
+        entry_enviar.configure(state='normal')
+        entry_enviar.focus_set()
+
+    def falhar_pergunta(mensagem):
+        exibir_mensagem('Erro', mensagem)
+        messagebox.showerror('Erro', mensagem)
+        entry_enviar.configure(state='normal')
+        entry_enviar.focus_set()
+
+    executar_em_background(processar_pergunta, concluir_pergunta, falhar_pergunta)
 
 
 def graficos_prontos():
@@ -471,24 +530,42 @@ def consulta_sql():
 
     def executar():
         sql = entry_sql.get('1.0', 'end').strip()
-        if not sql.lower().startswith('select'):
-            messagebox.showwarning('Erro', 'Apenas consultas SELECT são permitidas.')
-            return
-        try:
-            df_res = pd.read_sql_query(sql, con=m.engine)
-            if df_res.empty:
-                exibir_mensagem('Sistema', 'Nenhum resultado retornado.')
-                messagebox.showinfo('Aviso', 'Nenhum resultado retornado.')
-                return
-            path = os.path.join('consultas', f'consulta_{int(time.time())}.xlsx')
-            df_res.to_excel(path, index=False)
-            exibir_mensagem('Sistema', f'Consulta executada com sucesso. Resultado salvo em {path}')
-            messagebox.showinfo('Sucesso', f'Resultado salvo em:\n{path}')
-        except Exception as e:
-            exibir_mensagem('Erro', str(e))
-            messagebox.showerror('Erro', str(e))
 
-    ttk.Button(janela_sql, text='Executar', style='Custom.TButton', command=executar).pack(pady=10)
+        def processar_consulta():
+            with m.SessionLocal() as sess:
+                return m.execute_custom_query(
+                    sess,
+                    sql,
+                    'Consulta executada pela interface gráfica',
+                )
+
+        def concluir_consulta(resultado):
+            botao_executar.configure(state='normal')
+            caminho = resultado['caminho_arquivo']
+            linhas = resultado['linhas']
+            colunas = resultado['colunas']
+            mensagem = (
+                f'Consulta executada com sucesso: {linhas} linhas × {colunas} colunas. '
+                f'Resultado salvo em {caminho}'
+            )
+            exibir_mensagem('Sistema', mensagem)
+            messagebox.showinfo('Sucesso', mensagem)
+
+        def falhar_consulta(mensagem):
+            botao_executar.configure(state='normal')
+            exibir_mensagem('Erro', mensagem)
+            messagebox.showerror('Erro', mensagem)
+
+        botao_executar.configure(state='disabled')
+        executar_em_background(processar_consulta, concluir_consulta, falhar_consulta)
+
+    botao_executar = ttk.Button(
+        janela_sql,
+        text='Executar',
+        style='Custom.TButton',
+        command=executar,
+    )
+    botao_executar.pack(pady=10)
 
 
 def remover_arquivo():

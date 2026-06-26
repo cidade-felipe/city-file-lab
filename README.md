@@ -35,22 +35,24 @@ A aplicação pode ser usada tanto em modo terminal quanto pela interface gráfi
 
 - Upload de arquivos com armazenamento binário no banco
 - Extração de texto de múltiplos formatos:
-  - pdf, docx, xlsx, xls, csv, txt, md :contentReference[oaicite:2]{index=2}
+  - pdf, docx, xlsx, xls, csv, txt, md
+- Detecção de conteúdo duplicado pelo hash SHA-256
 - Geração de resumo automático de cada arquivo com LLM (ou resumo simples se a API não estiver configurada)
 - Indexação do conteúdo com FAISS e sentence-transformers
 - Perguntas em linguagem natural sobre um arquivo específico usando RAG
 - Registro de perguntas, respostas e tempo de execução
 - Logs detalhados de erros, uploads, resumos e indexação
 - Remoção completa de arquivos e dados relacionados
-- Execução de consultas SQL customizadas com exportação do resultado para Excel
+- Execução de consultas `SELECT` em transação somente leitura, com auditoria e exportação para Excel
 - Gráficos prontos com Matplotlib:
   - quantidade de arquivos por tipo
   - perguntas por arquivo
-  - tempo médio de resposta por tipo de arquivo :contentReference[oaicite:3]{index=3}
+  - tempo médio de resposta por tipo de arquivo
 - Interface gráfica em Tkinter com:
   - chat com balões para usuário e IA
   - seleção de arquivo para perguntas
-  - botões para criar e remover tabelas, upload, gráficos, SQL customizado e remoção de arquivos :contentReference[oaicite:4]{index=4}
+  - botões para criar e remover tabelas, upload, gráficos, SQL customizado e remoção de arquivos
+  - processamento de uploads, perguntas e consultas em segundo plano para manter a interface responsiva
 
 ---
 
@@ -85,7 +87,7 @@ O projeto é dividido em dois módulos principais:
   - criação, drop e verificação de tabelas
   - upload, remoção e log
   - geração de gráficos e consultas SQL customizadas
-  - menu opcional de terminal :contentReference[oaicite:6]{index=6}
+  - menu opcional de terminal
 
 - `gui.py`: interface gráfica  
   - janela principal em Tkinter
@@ -100,13 +102,13 @@ O projeto é dividido em dois módulos principais:
     - rodar 3 gráficos prontos
     - executar consulta SQL customizada
     - sair
-  - uso de HtmlFrame para exibir resposta da IA em Markdown no chat :contentReference[oaicite:7]{index=7}
+  - uso de HtmlFrame para exibir resposta da IA em Markdown no chat
 
 Pastas e arquivos gerados automaticamente:
 
 - `indices_faiss`: índices vetoriais FAISS por arquivo
 - `charts`: imagens dos gráficos gerados
-- `consultas`: resultados de consultas SQL customizadas em Excel :contentReference[oaicite:8]{index=8}
+- `consultas`: resultados de consultas SQL customizadas em Excel
 
 ---
 
@@ -144,9 +146,9 @@ cd analisador-arquivos
 ### 2. Criar ambiente virtual (opcional, mas recomendado)
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # Linux / macOS
-.\.venv\Scripts\activate    # Windows
+python -m venv venv
+source venv/bin/activate    # Linux / macOS
+.\venv\Scripts\activate     # Windows
 ```
 
 ### 3. Instalar dependências
@@ -216,6 +218,28 @@ Os três gráficos prontos gerados por `3 Gráficos prontos` são:
 3. Tempo médio de resposta por tipo de arquivo
 
 Eles são exibidos na tela e salvos na pasta `charts`. 
+
+---
+
+## Testes
+
+Os testes usam `unittest` e um banco SQLite temporário em memória. Eles não alteram o PostgreSQL configurado no `.env`.
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Atualmente são cobertos os comportamentos de deduplicação por hash, aceitação de arquivos diferentes com o mesmo nome, rejeição de formatos não suportados, validação de consultas `SELECT` e confinamento dos índices FAISS.
+
+---
+
+## Segurança e limitações
+
+- As consultas customizadas aceitam uma única instrução `SELECT` e são executadas em uma transação PostgreSQL somente leitura.
+- A conta definida em `DATABASE_URL` também deve possuir apenas as permissões necessárias para a aplicação.
+- Os índices FAISS são carregados com desserialização habilitada pela biblioteca. Por isso, o sistema restringe o carregamento à pasta local `indices_faiss`.
+- Não existe autenticação ou identificação de usuários. O histórico registra a pergunta e o arquivo consultado, mas não quem realizou a ação.
+- A geração dos gráficos ainda abre janelas do Matplotlib e pode bloquear a interação enquanto elas estiverem visíveis.
 
 ---
 

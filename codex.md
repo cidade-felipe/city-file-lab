@@ -9,7 +9,7 @@ Este documento descreve detalhadamente a arquitetura, o modelo de dados, os flux
 O City File Lab foi concebido para centralizar e automatizar a análise de documentos corporativos e técnicos. Ao combinar um banco de dados relacional robusto (PostgreSQL) para armazenamento de metadados e arquivos originais com um mecanismo de busca semântica local (FAISS + HuggingFace) e modelos de linguagem de alto desempenho (Groq), o sistema proporciona:
 
 *   **Ganho de Eficiência Operacional**: Redução drástica do tempo gasto na busca manual de informações em documentos extensos. O usuário interage com os arquivos em linguagem natural.
-*   **Mitigação de Riscos e Conformidade**: Rastreabilidade completa de todas as interações. O sistema registra quem perguntou, qual arquivo foi consultado, a resposta gerada e os tempos de execução, permitindo auditoria.
+*   **Mitigação de Riscos e Conformidade**: Rastreabilidade das interações. O sistema registra a pergunta, o arquivo consultado, a resposta gerada e os tempos de execução. Não existe autenticação ou identificação de quem realizou a ação.
 *   **Análise de Dados Integrada**: Possibilidade de executar consultas SQL customizadas para extrair dados analíticos dos arquivos diretamente para planilhas do Excel, facilitando a geração de relatórios estratégicos.
 
 ---
@@ -53,7 +53,7 @@ graph TD
 
 1.  **Interface Gráfica (`gui.py`)**: Interface desktop amigável construída com Tkinter. Ela implementa um fluxo de chat dinâmico utilizando balões customizados e um renderizador HTML (`tkinterweb` com `HtmlFrame`) para exibir as respostas da inteligência artificial formatadas em Markdown (incluindo tabelas e blocos de código).
 2.  **Motor Principal (`main.py`)**: Centraliza as definições do banco de dados (modelos do ORM SQLAlchemy), a extração de conteúdo dos arquivos e a orquestração do pipeline RAG. Também contém a lógica para gerar gráficos analíticos estáticos via Matplotlib e exportar tabelas via Pandas.
-3.  **Ambiente Vetorial (`indices_faiss/`)**: Pasta local onde são salvos os índices vetoriais de cada arquivo após o processamento. Cada documento possui seu próprio arquivo de índice FAISS, agilizando a busca semântica segmentada e evitando vazamento de dados entre diferentes arquivos.
+3.  **Ambiente Vetorial (`indices_faiss/`)**: Pasta local onde são salvos os índices vetoriais de cada arquivo após o processamento. Cada documento possui seu próprio diretório de índice FAISS. Antes da desserialização, o caminho é validado para impedir carregamentos fora dessa pasta.
 4.  **Armazenamento de Resultados (`consultas/` e `charts/`)**: Pastas de apoio no disco para gravar arquivos gerados sob demanda (planilhas de consultas SQL customizadas e imagens dos gráficos de estatísticas de uso).
 
 ---
@@ -228,7 +228,7 @@ sequenceDiagram
     U->>G: Seleciona arquivo e clica em Upload
     G->>M: upload_file(sess, filepath)
     M->>M: Calcula SHA-256 e infere tipo
-    M->>DB: Busca por hash duplicado
+    M->>DB: Busca por SHA-256 duplicado
     alt Hash já existe no Banco
         DB-->>M: Retorna registro existente
         M-->>G: Alerta de arquivo duplicado
@@ -306,10 +306,10 @@ O sistema conta com rotinas de análise internas.
     *   *Gráfico 3*: Tempo médio de processamento/resposta da inteligência artificial por tipo de arquivo (gráfico de linhas).
     *   Os gráficos são salvos na pasta `charts/` com carimbos de tempo (timestamps) de geração e exibidos na tela.
 *   **Consultas SQL Customizadas**: O usuário pode redigir queries SELECT brutas diretamente na interface.
-    1.  A query é validada para garantir que contém apenas a instrução SELECT (evitando alterações acidentais de tabelas).
-    2.  O `pandas` executa a query e cria um dataframe.
+    1.  A query é validada para aceitar uma única instrução iniciada por `SELECT`.
+    2.  O PostgreSQL executa a query em uma transação configurada como somente leitura e o `pandas` cria um dataframe.
     3.  Os dados são salvos em formato de planilha do Excel (.xlsx) na pasta `consultas/`.
-    4.  O banco grava o histórico da consulta (`consulta_sql` e `resultado_consulta`), registrando a query estruturada, número de linhas e colunas resultantes e os registros completos em formato JSON.
+    4.  O banco grava o histórico da consulta (`consulta_sql` e `resultado_consulta`), tanto pela GUI quanto pelo terminal, registrando a query, número de linhas e colunas resultantes e os registros completos em formato JSON.
 
 ---
 
@@ -320,7 +320,7 @@ Para remover um arquivo e limpar o banco de dados completamente, garantindo a in
 2.  **Exclusão em Cascata das Respostas e Perguntas**: Remove todos os registros vinculados à tabela `resposta_ia` e depois da tabela `pergunta` relacionados ao arquivo.
 3.  **Remoção de Logs e Resumos**: Remove os logs e o resumo atrelados ao arquivo específico.
 4.  **Exclusão dos Metadados e Binários**: Remove os metadados do texto extraído (`conteudo_extraido`) e finalmente a linha principal na tabela `arquivo`.
-5.  **Rollback Automático**: Caso ocorra alguma falha durante os passos de remoção física ou no banco de dados, o SQLAlchemy executa um rollback para evitar estados inconsistentes ou dados órfãos.
+5.  **Rollback no Banco**: Caso uma operação de banco falhe, o SQLAlchemy executa rollback. A exclusão física do índice ocorre antes do commit e não pode ser revertida automaticamente, portanto uma falha posterior pode exigir a reconstrução do índice.
 
 ---
 
@@ -338,6 +338,7 @@ A interface foi implementada com Tkinter tradicional integrado com a biblioteca 
     *   *Mensagens do Sistema e Logs*: Balões cinzas ou coloridos (vermelho para erros) que exibem notificações de status do sistema.
     *   *Mensagens da Inteligência Artificial*: Balões azuis alinhados à esquerda, contendo um objeto `HtmlFrame` integrado que interpreta as tags HTML geradas a partir do Markdown do Groq.
 *   **Rolagem Automática**: Toda nova mensagem inserida força o reposicionamento do scroll do canvas para o final (`yview_moveto(1.0)`).
+*   **Operações em Segundo Plano**: Upload, geração de embeddings, perguntas à IA e consultas SQL são executados em threads de trabalho. As atualizações dos componentes Tkinter retornam para a thread principal por meio de `janela.after`.
 
 ---
 
@@ -364,3 +365,91 @@ GROQ_API_MODEL=llama-3.3-70b-versatile
 *   `matplotlib`: Plotagem e salvamento dos arquivos de gráficos.
 *   `markdown2`: Conversor de Markdown para HTML.
 *   `tkinterweb`: Renderizador de HTML/CSS integrado ao Tkinter para exibição dos textos de resposta formatados.
+
+---
+
+## 7. Estrutura de Pastas
+
+```text
+city-file-lab/
+├── main.py             # domínio, persistência, IA, relatórios e CLI
+├── gui.py              # interface desktop Tkinter
+├── tests/              # testes automatizados com unittest
+├── figure/             # recursos visuais versionados
+├── indices_faiss/      # índices locais gerados, ignorados pelo Git
+├── charts/             # gráficos gerados, ignorados pelo Git
+├── consultas/          # planilhas geradas, ignoradas pelo Git
+├── requirements.txt    # dependências fixadas
+├── README.md           # instruções de uso
+└── codex.md            # documentação técnica
+```
+
+Os diretórios gerados são resolvidos a partir da raiz do projeto, independentemente do diretório de trabalho usado para iniciar a aplicação.
+
+---
+
+## 8. Execução, Testes e Comandos
+
+### Ambiente
+
+```bash
+python -m venv venv
+```
+
+No Windows:
+
+```powershell
+.\venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### Aplicação
+
+```bash
+python gui.py
+python main.py
+```
+
+### Testes
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Os testes usam SQLite temporário em memória e mocks somente nos limites externos da indexação e da Groq. Eles cobrem deduplicação por conteúdo, arquivos homônimos com conteúdos distintos, formatos inválidos, validação SQL e confinamento de caminhos FAISS.
+
+---
+
+## 9. Padrões e Decisões Técnicas
+
+*   A duplicidade é determinada pelo SHA-256 do conteúdo. O nome original não participa dessa decisão.
+*   Formatos não suportados são rejeitados antes de qualquer alteração no banco.
+*   GUI e terminal reutilizam `execute_custom_query`, evitando regras diferentes para consulta, exportação e auditoria.
+*   Consultas customizadas aceitam uma única instrução `SELECT` e usam `SET TRANSACTION READ ONLY`.
+*   O acesso ao Tkinter ocorre somente na thread principal. Tarefas externas retornam resultados com `janela.after`.
+*   O FAISS exige desserialização para carregar seus metadados. O sistema só aceita caminhos contidos em `indices_faiss`.
+*   Não foram adicionadas dependências para essas proteções. Foram reutilizados SQLAlchemy, PostgreSQL, `threading` e `unittest`.
+
+---
+
+## 10. Implantação, Limitações e Riscos
+
+Não existe empacotamento, contêiner ou pipeline de implantação configurado. A execução atual é local e depende de PostgreSQL acessível, do modelo de embeddings instalado ou disponível para download e, para respostas generativas, da API da Groq.
+
+Limitações e riscos conhecidos:
+
+*   Não há autenticação, autorização nem identificação de usuários.
+*   O usuário do PostgreSQL deve seguir o princípio do menor privilégio. A transação somente leitura protege as consultas customizadas contra escrita no banco, mas não substitui permissões adequadas.
+*   A validação SQL aceita `SELECT`, mas funções PostgreSQL podem possuir efeitos externos ao banco. Funções não confiáveis não devem ser disponibilizadas ao usuário configurado.
+*   O carregamento inicial do modelo de embeddings pode consumir tempo, memória e rede.
+*   PDFs digitalizados sem camada de texto não possuem OCR e podem resultar em conteúdo vazio.
+*   CSVs usam a leitura padrão do pandas, sem detecção configurável de codificação ou delimitador.
+*   Os gráficos usam `plt.show()` e bloqueiam o fluxo enquanto a janela do Matplotlib estiver aberta.
+*   `main.py` ainda reúne responsabilidades de domínio, banco, IA, relatórios e CLI. Uma separação futura só deve ser feita quando houver necessidade concreta e cobertura de regressão suficiente.
+
+---
+
+## 11. Histórico Resumido
+
+*   **26/06/2026**: deduplicação corrigida para SHA-256, consultas centralizadas em transação somente leitura, auditoria SQL unificada, caminhos FAISS confinados, tarefas pesadas da GUI movidas para segundo plano e testes automatizados adicionados.
+*   **Versão inicial**: upload e extração de arquivos, persistência PostgreSQL, indexação FAISS, RAG com Groq, interface Tkinter, gráficos e consultas customizadas.
