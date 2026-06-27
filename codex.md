@@ -260,6 +260,7 @@ Após a gravação do texto extraído, o sistema inicia a vetorização.
 3.  **Estruturação FAISS**: A coleção de vetores é adicionada a um índice FAISS local.
 4.  **Gravação em Disco**: O índice é gravado localmente na pasta `indices_faiss/` no formato `faiss_<arquivo_id>.index`.
 5.  **Registro de Metadados**: A tabela `embedding` é populada com o caminho do arquivo físico e o total de chunks criados.
+6.  **Recuperação de Resíduos**: Um índice só é considerado válido quando o diretório contém `index.faiss` e `index.pkl`. Diretórios incompletos ou índices que falham na leitura são removidos e reconstruídos com o texto armazenado no banco.
 
 ---
 
@@ -322,6 +323,8 @@ Para remover um arquivo e limpar o banco de dados completamente, garantindo a in
 4.  **Exclusão dos Metadados e Binários**: Remove os metadados do texto extraído (`conteudo_extraido`) e finalmente a linha principal na tabela `arquivo`.
 5.  **Rollback no Banco**: Caso uma operação de banco falhe, o SQLAlchemy executa rollback. A exclusão física do índice ocorre antes do commit e não pode ser revertida automaticamente, portanto uma falha posterior pode exigir a reconstrução do índice.
 
+A remoção dos diretórios usa `shutil.rmtree` com tratamento para arquivos somente leitura. Falhas não são mais silenciadas: a operação informa erro em vez de retornar sucesso deixando diretórios parciais.
+
 ---
 
 ## 5. Estrutura e Estilização da Interface Gráfica (`gui.py`)
@@ -329,14 +332,17 @@ Para remover um arquivo e limpar o banco de dados completamente, garantindo a in
 A interface foi implementada com Tkinter tradicional integrado com a biblioteca `tkinterweb` para contornar a limitação de formatação textual rica do Tkinter.
 
 ### Características Visuais e UX
-*   **Tema Clam**: Configurado no `ttk.Style` para fornecer botões e campos de texto com estética limpa (cantos retos, cores suaves).
+*   **Sistema Visual**: Paleta centralizada em `CORES`, com azul como cor primária, fundo cinza claro, cartões brancos e sidebar em azul-marinho. A tipografia usa a família Segoe UI.
+*   **Tema Clam**: Mantido como base para personalizar campos, comboboxes, scrollbars e botões sem adicionar bibliotecas externas.
 *   **Divisão em Painéis**:
-    *   *Painel Esquerdo (Chat)*: Ocupa a maior parte da tela. Contém a visualização das mensagens e a caixa de texto para envio de perguntas.
-    *   *Painel Direito (Menu)*: Barra de ferramentas que exibe a logomarca do projeto (carregada dinamicamente da pasta `figure/logo.png`) e os botões de ação do sistema dispostos verticalmente.
+    *   *Sidebar Esquerda*: Exibe marca, ações agrupadas em Arquivos, Análise e Sistema, além da saída da aplicação.
+    *   *Workspace Principal*: Reúne cabeçalho, indicador de processamento, arquivo ativo, histórico do chat e campo de envio.
 *   **Balões de Chat Dinâmicos**: O sistema calcula a largura disponível da tela e cria retângulos com bordas arredondadas no Canvas para delimitar as mensagens:
-    *   *Mensagens do Usuário*: Balões verdes localizados no canto direito da tela.
-    *   *Mensagens do Sistema e Logs*: Balões cinzas ou coloridos (vermelho para erros) que exibem notificações de status do sistema.
-    *   *Mensagens da Inteligência Artificial*: Balões azuis alinhados à esquerda, contendo um objeto `HtmlFrame` integrado que interpreta as tags HTML geradas a partir do Markdown do Groq.
+    *   *Mensagens do Usuário*: Balões azuis alinhados à direita.
+    *   *Mensagens do Sistema e Logs*: Balões contextuais em violeta, verde, amarelo ou vermelho.
+    *   *Mensagens da Inteligência Artificial*: Cartões brancos alinhados à esquerda, contendo um `HtmlFrame` que interpreta o Markdown do Groq.
+*   **Modais Consistentes**: Seleção de arquivo, remoção e consulta SQL reutilizam cores, espaçamento e tipografia do workspace. O editor SQL usa tema escuro e fonte monoespaçada.
+*   **Feedback de Estado**: O cabeçalho alterna entre `Pronto` e `Processando`, e o arquivo selecionado permanece visível no topo do chat.
 *   **Rolagem Automática**: Toda nova mensagem inserida força o reposicionamento do scroll do canvas para o final (`yview_moveto(1.0)`).
 *   **Operações em Segundo Plano**: Upload, geração de embeddings, perguntas à IA e consultas SQL são executados em threads de trabalho. As atualizações dos componentes Tkinter retornam para a thread principal por meio de `janela.after`.
 
@@ -428,6 +434,7 @@ Os testes usam SQLite temporário em memória e mocks somente nos limites extern
 *   Consultas customizadas aceitam uma única instrução `SELECT` e usam `SET TRANSACTION READ ONLY`.
 *   O acesso ao Tkinter ocorre somente na thread principal. Tarefas externas retornam resultados com `janela.after`.
 *   O FAISS exige desserialização para carregar seus metadados. O sistema só aceita caminhos contidos em `indices_faiss`.
+*   Diretórios FAISS incompletos são descartados e reconstruídos automaticamente, evitando tentativas de leitura de resíduos deixados por interrupções ou limpezas antigas.
 *   Não foram adicionadas dependências para essas proteções. Foram reutilizados SQLAlchemy, PostgreSQL, `threading` e `unittest`.
 
 ---
@@ -451,5 +458,7 @@ Limitações e riscos conhecidos:
 
 ## 11. Histórico Resumido
 
+*   **26/06/2026**: limpeza dos diretórios FAISS corrigida para não silenciar falhas, com detecção e reconstrução automática de índices incompletos.
+*   **26/06/2026**: interface redesenhada com sidebar, workspace em cartões, estados visuais, chat atualizado, navegação agrupada e modais consistentes, sem novas dependências.
 *   **26/06/2026**: deduplicação corrigida para SHA-256, consultas centralizadas em transação somente leitura, auditoria SQL unificada, caminhos FAISS confinados, tarefas pesadas da GUI movidas para segundo plano e testes automatizados adicionados.
 *   **Versão inicial**: upload e extração de arquivos, persistência PostgreSQL, indexação FAISS, RAG com Groq, interface Tkinter, gráficos e consultas customizadas.

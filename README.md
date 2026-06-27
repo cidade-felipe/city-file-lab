@@ -49,9 +49,11 @@ A aplicação pode ser usada tanto em modo terminal quanto pela interface gráfi
   - perguntas por arquivo
   - tempo médio de resposta por tipo de arquivo
 - Interface gráfica em Tkinter com:
-  - chat com balões para usuário e IA
+  - sidebar escura com ações agrupadas por contexto
+  - workspace em cartões com status de processamento e arquivo ativo
+  - chat com balões modernos para usuário, IA e atividade do sistema
   - seleção de arquivo para perguntas
-  - botões para criar e remover tabelas, upload, gráficos, SQL customizado e remoção de arquivos
+  - modais estilizados para seleção, remoção e consultas SQL
   - processamento de uploads, perguntas e consultas em segundo plano para manter a interface responsiva
 
 ---
@@ -177,9 +179,10 @@ python gui.py
 
 A interface vai abrir com:
 
-* um painel de chat à esquerda
-* o menu de botões à direita
-* e uma mensagem inicial do sistema informando que a interface foi carregada com sucesso 
+* uma sidebar de navegação à esquerda
+* o workspace de análise e chat na área principal
+* indicadores do arquivo selecionado e do estado de processamento
+* um campo de conversa fixo na parte inferior
 
 ### 5. Executar pelo terminal (opcional)
 

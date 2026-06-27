@@ -1,8 +1,9 @@
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from sqlalchemy import create_engine
@@ -119,6 +120,83 @@ class IndexPathTests(unittest.TestCase):
         outside_path = os.path.join(main.BASE_DIR.parent, 'indice-nao-confiavel')
         with self.assertRaisesRegex(ValueError, 'fora da pasta permitida'):
             main.resolve_safe_index_path(outside_path)
+
+
+class FaissIndexRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine('sqlite:///:memory:')
+        main.Base.metadata.create_all(self.engine)
+        self.session_factory = sessionmaker(bind=self.engine)
+
+    def tearDown(self):
+        main.Base.metadata.drop_all(self.engine)
+
+    def test_rebuilds_an_incomplete_index_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir, self.session_factory() as session:
+            tipo = main.TipoArquivo(nome='txt')
+            arquivo = main.Arquivo(nome='arquivo.txt', tipo=tipo)
+            conteudo = main.ConteudoExtraido(arquivo=arquivo, texto='Conteúdo indexável para teste.')
+            session.add_all([tipo, arquivo, conteudo])
+            session.commit()
+
+            index_path = Path(temp_dir) / f'faiss_{arquivo.id}.index'
+            index_path.mkdir()
+
+            vector_store = MagicMock()
+
+            def save_local(path):
+                output_dir = Path(path)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                for filename in main.FAISS_INDEX_FILES:
+                    (output_dir / filename).write_bytes(b'indice')
+
+            vector_store.save_local.side_effect = save_local
+
+            with (
+                patch.object(main, 'INDEX_DIR', temp_dir),
+                patch.object(main, 'HuggingFaceEmbeddings'),
+                patch.object(main.FAISS, 'load_local') as load_local,
+                patch.object(main.FAISS, 'from_documents', return_value=vector_store),
+            ):
+                _, rebuilt_path = main.build_or_load_index_for_file(session, conteudo)
+
+            load_local.assert_not_called()
+            self.assertEqual(rebuilt_path, str(index_path))
+            self.assertTrue(main.is_faiss_index_complete(rebuilt_path))
+            self.assertEqual(session.query(main.Embedding).count(), 1)
+
+    def test_removes_a_nested_readonly_directory_completely(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_dir = Path(temp_dir) / 'indice'
+            nested_dir = target_dir / 'subpasta'
+            nested_dir.mkdir(parents=True)
+            readonly_file = nested_dir / 'index.faiss'
+            readonly_file.write_bytes(b'indice')
+            readonly_file.chmod(stat.S_IREAD)
+
+            main.remover_pasta_com_permissao(str(target_dir))
+
+            self.assertFalse(target_dir.exists())
+
+    def test_drop_all_removes_all_generated_directories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            generated_dirs = tuple(
+                str(Path(temp_dir) / name)
+                for name in ('indices_faiss', 'charts', 'consultas')
+            )
+            for directory in generated_dirs:
+                path = Path(directory)
+                path.mkdir()
+                (path / 'residuo').mkdir()
+
+            with (
+                patch.object(main.Base.metadata, 'drop_all'),
+                patch.object(main, 'caminhos', generated_dirs),
+            ):
+                result = main.drop_all()
+
+            self.assertEqual(result, '[OK] Todas as tabelas foram removidas.')
+            self.assertTrue(all(not Path(path).exists() for path in generated_dirs))
 
 
 if __name__ == '__main__':

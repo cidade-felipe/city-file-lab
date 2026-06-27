@@ -185,6 +185,7 @@ EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
 INDEX_DIR = str(BASE_DIR / 'indices_faiss')
 CHART_DIR = str(BASE_DIR / 'charts')
 RESULT_CONSULTA_DIR = str(BASE_DIR / 'consultas')
+FAISS_INDEX_FILES = ('index.faiss', 'index.pkl')
 caminhos = (INDEX_DIR, CHART_DIR, RESULT_CONSULTA_DIR)
 
 tipos_arquivos = ['pdf', 'txt', 'xlsx', 'xls', 'docx', 'md', 'csv']
@@ -307,6 +308,13 @@ def extract_content_by_type(tipo: str, data: bytes) -> str:
 # ---------------------------------------------------------------------
 # FAISS / EMBEDDINGS
 # ---------------------------------------------------------------------
+def is_faiss_index_complete(index_path: str) -> bool:
+    return os.path.isdir(index_path) and all(
+        os.path.isfile(os.path.join(index_path, filename))
+        for filename in FAISS_INDEX_FILES
+    )
+
+
 def build_or_load_index_for_file(sess, conteudo: ConteudoExtraido) -> Tuple[FAISS, str]:
     texto = conteudo.texto or ''
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
@@ -321,9 +329,16 @@ def build_or_load_index_for_file(sess, conteudo: ConteudoExtraido) -> Tuple[FAIS
         os.path.join(INDEX_DIR, f'faiss_{conteudo.arquivo_id}.index')
     )
 
-    if os.path.exists(index_path):
-        vs = FAISS.load_local(index_path, emb, allow_dangerous_deserialization=True)
+    if is_faiss_index_complete(index_path):
+        try:
+            vs = FAISS.load_local(index_path, emb, allow_dangerous_deserialization=True)
+        except Exception:
+            remover_pasta_com_permissao(index_path)
+            vs = FAISS.from_documents(docs, emb)
+            vs.save_local(index_path)
     else:
+        if os.path.exists(index_path):
+            remover_pasta_com_permissao(index_path)
         vs = FAISS.from_documents(docs, emb)
         vs.save_local(index_path)
 
@@ -336,7 +351,11 @@ def build_or_load_index_for_file(sess, conteudo: ConteudoExtraido) -> Tuple[FAIS
             index_path=index_path,
         )
         sess.add(meta)
-        sess.commit()
+    else:
+        meta.num_chunks = len(docs)
+        meta.dim = 384
+        meta.index_path = index_path
+    sess.commit()
     return vs, index_path
 
 
@@ -370,7 +389,7 @@ def answer_question(sess, arquivo_id: int, pergunta_texto: str) -> str:
         stored_index_path = getattr(embedding_meta, 'index_path', '') if embedding_meta else ''
         index_path = resolve_safe_index_path(stored_index_path) if stored_index_path else ''
 
-        if not embedding_meta or not os.path.exists(index_path):
+        if not embedding_meta or not is_faiss_index_complete(index_path):
             vs, _ = build_or_load_index_for_file(sess, arq.conteudo_extraido)
         else:
             emb = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
@@ -523,25 +542,18 @@ def remover_pasta_com_permissao(caminho: str) -> None:
     if not os.path.exists(caminho):
         return
 
-    for root, dirs, files in os.walk(caminho, topdown=False):
-        for nome_arquivo in files:
-            file_path = os.path.join(root, nome_arquivo)
-            with contextlib.suppress(Exception):
-                os.chmod(file_path, stat.S_IWRITE)
-            try:
-                os.remove(file_path)
-            except PermissionError:
-                time.sleep(0.1)
-                with contextlib.suppress(Exception):
-                    os.remove(file_path)
+    def remover_readonly(func, path, _exc_info):
+        os.chmod(path, stat.S_IRWXU)
+        func(path)
 
-        for nome_dir in dirs:
-            dir_path = os.path.join(root, nome_dir)
-            with contextlib.suppress(Exception):
-                os.rmdir(dir_path)
+    if os.path.isdir(caminho):
+        shutil.rmtree(caminho, onerror=remover_readonly)
+    else:
+        os.chmod(caminho, stat.S_IRWXU)
+        os.remove(caminho)
 
-    with contextlib.suppress(Exception):
-        os.rmdir(caminho)
+    if os.path.exists(caminho):
+        raise OSError(f'Não foi possível remover completamente: {caminho}')
 
 
 def remove_file(sess, arquivo_id: int) -> str:
@@ -597,23 +609,16 @@ def remove_file(sess, arquivo_id: int) -> str:
 
 
 def cleanup_indices():
-    with contextlib.suppress(Exception):
-        gc.collect()
-        time.sleep(0.2)
+    gc.collect()
+    time.sleep(0.2)
 
-        if not os.path.exists(INDEX_DIR):
-            return
+    if not os.path.exists(INDEX_DIR):
+        return
 
-        for f in os.listdir(INDEX_DIR):
-            path = os.path.join(INDEX_DIR, f)
-            if os.path.isdir(path):
-                remover_pasta_com_permissao(path)
-            else:
-                with contextlib.suppress(Exception):
-                    os.chmod(path, stat.S_IWRITE)
-                    os.remove(path)
+    for filename in os.listdir(INDEX_DIR):
+        remover_pasta_com_permissao(os.path.join(INDEX_DIR, filename))
 
-        return '[LIMPEZA] Índices FAISS limpos.'
+    return '[LIMPEZA] Índices FAISS limpos.'
 
 
 # ---------------------------------------------------------------------
